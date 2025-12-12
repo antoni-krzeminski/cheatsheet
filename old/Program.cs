@@ -111,7 +111,7 @@ namespace ReflectionExamTask
                     {
                         prop.SetValue(instance, valueToSet);
                         
-                        // Weryfikacja (czytamy, czy się ustawiło)
+                        // Weryfikacja (czytamy, co zy się ustawiło)
                         var currentValue = prop.GetValue(instance);
                         Console.WriteLine($"   [SUKCES] Wartość w obiekcie wynosi teraz: {currentValue}");
                     }
