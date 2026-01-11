@@ -1,220 +1,261 @@
 
-# 📘 Skrypt Teoretyczny: Zaawansowane Operacje Wejścia/Wyjścia w C#
 
-## Wstęp
+# 📖 Skrypt: Zaawansowane I/O i Sieci w C# (.NET)
 
-Laboratorium 12 skupia się na komunikacji i wydajnym przetwarzaniu danych poza standardową pamięcią RAM aplikacji. Zamiast operować tylko na zmiennych w pamięci, będziesz wymieniać dane między procesami (IPC), między komputerami (TCP) oraz mapować gigantyczne pliki bezpośrednio do przestrzeni adresowej procesu.
+## 1. Komunikacja Sieciowa (TCP/IP)
 
----
+### Teoria w pigułce
 
-## Część 1: Komunikacja Sieciowa (TCP/IP)
+TCP to protokół strumieniowy. To najważniejsza rzecz, którą musisz pamiętać.
 
-### 1.1. Podstawy protokołu TCP w .NET
+* **Strumień (Stream):** Dane płyną jak woda w rurze. Nie ma pojęcia "paczki". Jeśli wyślesz "ABC" i "DEF", odbiorca może dostać "ABCDEF", "A", "BCDEF" albo "ABCDE", "F".
+* **Framing (Ramkowanie):** Aby wiedzieć, gdzie kończy się jedna wiadomość, a zaczyna druga, musisz użyć własnego protokołu. Najczęstszy standard na labach to:
 
-Protokół TCP (Transmission Control Protocol) to protokół strumieniowy. Gwarantuje on dostarczenie danych w kolejności, ale **nie gwarantuje zachowania granic wiadomości**. Oznacza to, że jeśli wyślesz dwie wiadomości po 100 bajtów, odbiorca może otrzymać jedną paczkę 200 bajtów, albo dziesięć paczek po 20 bajtów.
 
-Dlatego w zadaniu  wymagane jest zdefiniowanie własnego "protokołu" (tzw. framing), który w tym przypadku wygląda tak:
-`[DŁUGOŚĆ (4 bajty)]` + `[TREŚĆ (JSON)]`
+* **Endianness:** Sieć zazwyczaj wymaga **Big Endian** (najbardziej znaczący bajt pierwszy), a Twój procesor to prawdopodobnie **Little Endian**. Musisz konwertować liczby.
 
-### 1.2. Kluczowe Klasy
+### 🛠️ Szablon: Uniwersalna obsługa wiadomości (TCP)
 
-* **`TcpListener`**: Klasa serwera. Nasłuchuje na wskazanym porcie na przychodzące połączenia.
-* **`TcpClient`**: Klasa klienta (lub reprezentacja klienta po stronie serwera). Umożliwia nawiązanie połączenia.
-* **`NetworkStream`**: Strumień danych. To tutaj piszesz (`Write`) i czytasz (`Read`) bajty.
+To jest kod, który ratuje życie, gdy trzeba wysłać/odebrać dane i nie martwić się o to, że TCP utnie kawałek wiadomości.
 
-### 1.3. Endianness (Kolejność bajtów)
+#### A. Wysyłanie (Writer)
 
-Komputery (x86/x64) zazwyczaj pracują w trybie **Little Endian** (najmniej znaczący bajt pierwszy). Protokoły sieciowe (tzw. Network Byte Order) zazwyczaj wymagają **Big Endian**.
-
-W zadaniu musisz przesłać nagłówek długości jako `int` w Big Endian.
-
-**Przykład konwersji (C#):**
+Wysyłamy 4 bajty długości, a potem treść (np. JSON lub tekst).
 
 ```csharp
-using System.Buffers.Binary;
+using System.Net.Sockets;
+using System.Buffers.Binary; // Ważne do Endianness
+using System.Text;
+using Newtonsoft.Json; // Jeśli używasz JSON
 
-int dlugosc = 125;
-byte[] naglowek = new byte[4];
+public static void SendMessage<T>(NetworkStream stream, T data)
+{
+    // 1. Serializacja (zamiana obiektu na bajty)
+    string json = JsonConvert.SerializeObject(data);
+    byte[] bodyBytes = Encoding.UTF8.GetBytes(json);
+    
+    // 2. Przygotowanie nagłówka (Długość treści)
+    byte[] headerBytes = new byte[4];
+    [cite_start]// Zapisz int jako BigEndian (standard sieciowy) [cite: 45]
+    BinaryPrimitives.WriteInt32BigEndian(headerBytes, bodyBytes.Length);
 
-// Zapisz int jako Big Endian do tablicy bajtów
-BinaryPrimitives.WriteInt32BigEndian(naglowek, dlugosc);
-
-// Odczyt (gdy odbierasz dane)
-int odebranaDlugosc = BinaryPrimitives.ReadInt32BigEndian(odebranyBufor);
+    // 3. Wysłanie
+    // Najpierw długość, potem ciało
+    stream.Write(headerBytes, 0, headerBytes.Length); 
+    stream.Write(bodyBytes, 0, bodyBytes.Length);
+}
 
 ```
 
-### 1.4. Serializacja JSON
+#### B. Odbieranie (Reader) - TO JEST NAJWAŻNIEJSZE
 
-W zadaniu treść wiadomości to JSON zakodowany w UTF-8. Należy użyć biblioteki `Newtonsoft.Json`.
+Metoda `Read` w strumieniu **nie gwarantuje** odczytania tylu bajtów, ile chcesz. Musisz pętlić, aż zbierzesz wszystko.
 
-**Schemat wysyłania wiadomości (Pseudokod dla `MessageWriter`):**
+```csharp
+public static T ReceiveMessage<T>(NetworkStream stream)
+{
+    // 1. Odczyt nagłówka (4 bajty)
+    byte[] headerBytes = new byte[4];
+    if (!ReadExactly(stream, headerBytes, 4)) return default; // Zerwane połączenie
 
-1. Zserializuj obiekt do stringa (JSON).
-2. Zamień string na tablicę bajtów (UTF-8).
-3. Sprawdź, czy rozmiar nie przekracza 10kB – jeśli tak, rzuć `TooLongMessageException`.
+    // 2. Parsowanie długości
+    int bodyLength = BinaryPrimitives.ReadInt32BigEndian(headerBytes);
 
+    // Opcjonalnie: Zabezpieczenie przed gigantycznymi wiadomościami
+    if (bodyLength > 10 * 1024) throw new Exception("Za duża wiadomość!");
 
-4. Przygotuj nagłówek (4 bajty, Big Endian) z długością tablicy bajtów.
-5. Wyślij do strumienia: najpierw nagłówek, potem treść.
+    // 3. Odczyt właściwej treści
+    byte[] bodyBytes = new byte[bodyLength];
+    if (!ReadExactly(stream, bodyBytes, bodyLength)) return default;
 
-**Schemat odbierania wiadomości (Pseudokod dla `MessageReader`):**
+    // 4. Deserializacja
+    string json = Encoding.UTF8.GetString(bodyBytes);
+    return JsonConvert.DeserializeObject<T>(json);
+}
 
-1. Czytaj ze strumienia dokładnie 4 bajty (pamiętaj: `Stream.Read` może zwrócić mniej niż poprosiłeś, użyj pętli `ReadExactly` lub podobnej logiki).
-2. Zinterpretuj te 4 bajty jako `int` (długość).
-3. Jeśli długość > 10kB -> Błąd.
+// Funkcja pomocnicza - czyta AŻ uzbiera 'count' bajtów
+private static bool ReadExactly(NetworkStream stream, byte[] buffer, int count)
+{
+    int offset = 0;
+    while (offset < count)
+    {
+        int read = stream.Read(buffer, offset, count - offset);
+        if (read == 0) return false; // Koniec strumienia (rozłączenie)
+        offset += read;
+    }
+    return true;
+}
 
+```
 
-4. Czytaj ze strumienia dokładnie tyle bajtów, ile wynosi długość.
-5. Zamień bajty na string (UTF-8), a string na obiekt (Deserializacja).
+### 🛠️ Szablon: Klient i Serwer (Inicjalizacja)
+
+**Serwer (TcpListener):**
+
+```csharp
+TcpListener listener = new TcpListener(IPAddress.Any, 5000);
+listener.Start();
+Console.WriteLine("Serwer czeka...");
+
+while (true)
+{
+    TcpClient client = await listener.AcceptTcpClientAsync();
+    // Obsługa klienta w tle (żeby nie blokować reszty)
+    _ = HandleClientAsync(client); 
+}
+
+```
+
+**Klient (TcpClient):**
+
+```csharp
+using TcpClient client = new TcpClient();
+// Timeout na łączenie (częsty wymóg)
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+try {
+    await client.ConnectAsync("127.0.0.1", 5000, cts.Token);
+} catch {
+    Console.WriteLine("Nie udało się połączyć.");
+}
+
+```
 
 ---
 
-## Część 2: Łącza Nazwane (Named Pipes)
+## 2. Łącza Nazwane (Named Pipes)
 
-### 2.1. Czym są Pipes?
+### Teoria w pigułce
 
-Named Pipes (łącza nazwane) to mechanizm IPC (Inter-Process Communication). Pozwalają na bardzo szybką wymianę danych między procesami działającymi **na tym samym komputerze**. Działają podobnie do plików lub socketów, ale są zoptymalizowane przez system operacyjny (dane często nie trafiają nawet na dysk, siedzą w RAM).
+Służą do komunikacji procesów na **tym samym komputerze**. Są szybsze niż TCP i działają bardziej jak pliki.
 
-W zadaniu tworzysz bazę klucz-wartość (Key-Value Store).
+* Ścieżka do pipe'a (w systemie Windows) to zawsze: `\\.\pipe\NazwaTwojejRury`. W kodzie C# podajesz tylko `NazwaTwojejRury`.
+* Częsty model: Serwer tworzy rurę, Klient się do niej podpina.
+* Komunikacja jest zazwyczaj tekstowa (StreamReader/StreamWriter).
 
-### 2.2. Kluczowe Klasy
+### 🛠️ Szablon: Serwer i Klient Pipe
 
-* **`NamedPipeServerStream`**: Tworzona przez serwer. Czeka na połączenie (`WaitForConnectionAsync`).
-* **`NamedPipeClientStream`**: Tworzona przez klienta. Łączy się z serwerem (`Connect`).
-
-### 2.3. Protokół Komunikacji
-
-Tutaj protokół jest prostszy niż w TCP – tekstowy, oddzielony znakami nowej linii.
-
-* Komendy: `SET key value`, `GET key`, `DELETE key`.
-
-
-* Ważne: Wiadomości nie mogą zawierać znaku nowej linii w treści.
-
-
-
-**Przykład implementacji (Klient):**
+**Serwer (NamedPipeServerStream):**
 
 ```csharp
 using System.IO.Pipes;
 
-[cite_start]// Łączenie z timeoutem [cite: 136]
-using var client = new NamedPipeClientStream(".", "NazwaRury", PipeDirection.InOut);
+// Serwer musi podać nazwę rury
+using var server = new NamedPipeServerStream("MojaRuraTestowa", PipeDirection.InOut);
+
+Console.WriteLine("Czekam na połączenie...");
+await server.WaitForConnectionAsync(); // Blokuje aż klient się podłączy
+
+// Czytanie i pisanie jak w pliku tekstowym
+using var reader = new StreamReader(server);
+using var writer = new StreamWriter(server) { AutoFlush = true }; // WAŻNE: AutoFlush!
+
+string message = await reader.ReadLineAsync(); // Czytaj linię
+await writer.WriteLineAsync("Otrzymałem: " + message); // Odpisz
+
+```
+
+**Klient (NamedPipeClientStream):**
+
+```csharp
+using System.IO.Pipes;
+
+// Klient podaje kropkę "." jako nazwę serwera (ten sam komputer)
+using var client = new NamedPipeClientStream(".", "MojaRuraTestowa", PipeDirection.InOut);
+
 try {
-    await client.ConnectAsync(3000); // 3 sekundy
+    await client.ConnectAsync(2000); // Timeout 2s
 } catch (TimeoutException) {
-    // Obsługa błędu
+    Console.WriteLine("Serwer nie odpowiada.");
+    return;
 }
 
-// Pisanie i czytanie (można użyć StreamWriter/StreamReader dla wygody)
 using var writer = new StreamWriter(client) { AutoFlush = true };
 using var reader = new StreamReader(client);
 
-await writer.WriteLineAsync("GET mojKlucz");
-string odpowiedz = await reader.ReadLineAsync();
+await writer.WriteLineAsync("Hej serwer!");
+string response = await reader.ReadLineAsync();
 
 ```
 
-### 2.4. Cancellation Token
-
-W zadaniu wielokrotnie pojawia się wymóg obsługi `CancellationToken`. To standardowy w .NET sposób na przerywanie operacji asynchronicznych (np. gdy zamykamy serwer).
-
-* Przekazuj token do każdej metody asynchronicznej (np. `ReadAsync(buffer, token)`).
-
 ---
 
-## Część 3: Mapowanie Plików (Memory Mapped Files)
+## 3. Mapowanie Plików (Memory Mapped Files)
 
-### 3.1. Problem
+### Teoria w pigułce
 
-Masz plik CSV, który jest większy niż dostępna pamięć RAM (np. 10 GB). Nie możesz zrobić `File.ReadAllLines()`, bo wyrzuci `OutOfMemoryException`.
-Tradycyjne `FileStream` i czytanie linia po linii jest bezpieczne, ale może być wolne przy losowym dostępie (skakanie po pliku).
+Używane, gdy plik jest za duży na RAM (np. 5GB) lub gdy wiele procesów chce współdzielić pamięć.
 
-### 3.2. Rozwiązanie: Memory Mapped Files (MMF)
+* Mapujesz plik z dysku do wirtualnej pamięci operacyjnej.
+* Nie używasz `Read`, tylko przesuwasz się wskaźnikiem (offsetem).
+* **Accessor:** To twoje "okienko" na plik. Możesz stworzyć Accessor (widok) na cały plik lub tylko na mały fragment (np. od bajtu 1000 do 2000).
 
-MMF pozwala mapować plik z dysku bezpośrednio do wirtualnej przestrzeni adresowej procesu. Dla Twojego programu wygląda to tak, jakby cały plik był w tablicy w pamięci, a system operacyjny zajmuje się doczytywaniem fragmentów (stronicowaniem) z dysku w tle. Jest to ekstremalnie wydajne.
+### 🛠️ Szablon: Czytanie dużego pliku
 
-### 3.3. Zadanie: BigCSVReader
-
-Musisz zaimplementować dwie wersje czytnika:
-
-1. **`StreamBigCsvReader`**: Używa zwykłego `FileStream` + `Seek`.
-2. **`MmfBigCsvReader`**: Używa `MemoryMappedFile`.
-
-Kluczowy jest tu plik `.offsets`. Ponieważ linie w CSV mają różną długość, nie wiesz, gdzie zaczyna się 100-tna linia bez przeczytania 99 poprzednich. Dlatego w konstruktorze tworzony jest indeks (plik `.offsets`), który przechowuje pozycję startową każdego wiersza jako `long` (8 bajtów).
-
-### 3.4. Implementacja MMF
-
-Będziesz używać klas:
-
-* `MemoryMappedFile.CreateFromFile(...)` – otwiera plik.
-* `MemoryMappedViewAccessor` – "okno", przez które zaglądasz do pliku.
-
-**Przykład odczytu fragmentu za pomocą MMF:**
+Załóżmy, że musisz przeczytać fragment pliku od pozycji `offset` o długości `length`.
 
 ```csharp
 using System.IO.MemoryMappedFiles;
+using System.Text;
 
-// Otwarcie pliku
-using var mmf = MemoryMappedFile.CreateFromFile("plik.csv", FileMode.Open);
+public string ReadFragment(string path, long offset, int length)
+{
+    // 1. Otwórz plik z dysku
+    using var mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
 
-// Utworzenie widoku (można mapować tylko fragment, tu mapujemy całość lub fragment)
-using var accessor = mmf.CreateViewAccessor(offset, length);
+    // 2. Stwórz "widok" (okno) na konkretny fragment
+    // offset = gdzie zacząć, length = ile bajtów mapować
+    using var accessor = mmf.CreateViewAccessor(offset, length, MemoryMappedFileAccess.Read);
 
-// Odczyt bajtów
-byte[] buffer = new byte[length];
-accessor.ReadArray(0, buffer, 0, buffer.Length);
+    // 3. Przygotuj bufor w RAMie
+    byte[] buffer = new byte[length];
 
-[cite_start]// Konwersja na string (pamiętaj o kodowaniu UTF-8 [cite: 191])
-string linia = Encoding.UTF8.GetString(buffer);
+    // 4. Skopiuj dane z "okna" do bufora
+    // 0 = pozycja w widoku (początek naszego okna)
+    accessor.ReadArray(0, buffer, 0, length);
+
+    // 5. Zinterpretuj dane (np. jako tekst)
+    return Encoding.UTF8.GetString(buffer);
+}
 
 ```
 
+### Przydatne operacje na MMF
+
+* **Czytanie liczb (structów):** Jeśli plik jest binarny (nie tekstowy), `ViewAccessor` jest super szybki.
+```csharp
+int liczba = accessor.ReadInt32(pozycja);
+double ułamek = accessor.ReadDouble(pozycja + 4);
+
+```
+
+
+
 ---
 
-## 🚀 Praktyczny Checklist do Laboratorium
+## 4. Cheat Sheet: Komendy i Przydatne Klasy
 
-### Zadanie 1: Chat (TCP)
+### Przydatne klasy z .NET
 
-1. **MessageDTO:** Klasa do przesyłania danych.
-2. **MessageWriter:**
-* Sprawdź długość (max 10kB).
-* Zapisz nagłówek (4 bajty Big Endian).
-* Zapisz JSON.
+| Klasa | Namespace | Zastosowanie |
+| --- | --- | --- |
+| `BinaryPrimitives` | `System.Buffers.Binary` | Kluczowe do zamiany BigEndian <-> LittleEndian (`ReadInt32BigEndian`). |
+| `CancellationTokenSource` | `System.Threading` | Do robienia timeoutów i przerywania zadań. |
+| `Encoding.UTF8` | `System.Text` | `GetBytes()` (string->byte[]) i `GetString()` (byte[]->string). |
+| `StreamWriter` | `System.IO` | Pamiętaj o `AutoFlush = true` przy `Pipe` i `NetworkStream`! |
 
+### Przydatne polecenia konsolowe (Terminal)
 
-3. **MessageReader:**
-* Odczytaj nagłówek -> ustal długość.
-* Odczytaj resztę -> deserializuj.
-* Obsłuż wyjątki (`InvalidMessageException`, `TooLongMessageException`).
-
-
-4. **Serwer:**
-* Metoda `ForwardMessagesAsync`: Odbierz od klienta A -> wypisz na konsolę -> wyślij do klienta B.
+* 
+`ipconfig` (Windows) / `ip a` (Linux/Mac) – sprawdzenie IP.
 
 
+* `netstat -an | findstr 5000` – sprawdź, czy coś nasłuchuje na porcie 5000 (Windows).
+* `dotnet run -- argumenty` – uruchomienie programu z argumentami (np. IP i port).
 
+### Jak radzić sobie z wyjątkami (Common Patterns)
 
+1. **Timeout:** Zawsze używaj `CancellationTokenSource` z `TimeSpan`.
+2. **Koniec strumienia:** Jeśli `stream.Read` zwróci `0` lub `reader.ReadLine` zwróci `null` -> druga strona zamknęła połączenie.
+3. **Za duży plik/wiadomość:** Zawsze sprawdzaj `length` przed alokacją tablicy (`new byte[length]`), żeby ktoś nie wysłał Ci 2GB i nie wysadził pamięci.
 
-### Zadanie 2: Baza Key-Value (Pipes)
-
-1. **Serwer:**
-* `NamedPipeServerStream`.
-* Pętla nasłuchująca komend (`StreamReader.ReadLine`).
-* Obsługa: SET, GET, DELETE.
-
-
-2. **Klient:**
-* `NamedPipeClientStream` z timeoutem 3s.
-* Wysyłanie komend i odbieranie odpowiedzi ("OK", "NOT_FOUND", "ERROR").
-
-
-
-### Zadanie 3: CSV (MMF)
-
-1. **StreamReader:** Implementacja przy użyciu `FileStream.Seek(offset)` i odczytu bajtów.
-2. **MmfReader:** Implementacja przy użyciu `MemoryMappedFile` i `ViewAccessor`.
-3. Korzystaj z pliku `.offsets` (dostarczonego w kodzie startowym), aby wiedzieć, gdzie `Seek`-ować.
-
-Czy chciałbyś, abym przygotował teraz szkielet kodu dla konkretnej klasy, np. `MessageReader` lub `MmfBigCsvReader`?
+To jest zestaw narzędzi, z którym powinieneś poradzić sobie z większością zadań na labach z "Programowania sieciowego i współbieżnego". Powodzenia!
